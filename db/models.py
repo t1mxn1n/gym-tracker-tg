@@ -55,3 +55,6 @@ class History(Base):
     bp_id: Mapped[int] = mapped_column(ForeignKey("body_part.id"))
     exercise_id: Mapped[int] = mapped_column(ForeignKey("exercise.id"))
     note: Mapped[str] = mapped_column(String(50))
+
+    exercise: Mapped["Exercise"] = relationship(foreign_keys=[exercise_id])
+    body_part: Mapped["BodyPart"] = relationship(foreign_keys=[bp_id])

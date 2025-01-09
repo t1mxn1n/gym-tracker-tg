@@ -1,41 +1,37 @@
 import asyncio
-import json
-from os import getenv
 import logging
+import os
+from collections import defaultdict
+from datetime import datetime, time
+from os import getenv
 
-from aiogram import Bot, Dispatcher, F
+from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
-from aiogram.utils.keyboard import InlineKeyboardMarkup, InlineKeyboardButton, InlineKeyboardBuilder
-from aiogram.types.callback_query import CallbackQuery
 from aiogram.filters import CommandStart, Command
-from aiogram.filters.callback_data import CallbackData
-from aiogram.types import Message
 from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.types import Message, FSInputFile
+from aiogram.types.callback_query import CallbackQuery
+from aiogram.utils.keyboard import InlineKeyboardMarkup, InlineKeyboardButton, InlineKeyboardBuilder
 from alembic import command
 from alembic.config import Config
 from dotenv import load_dotenv
 from loguru import logger
+from sqlalchemy import and_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.future import select
-from sqlalchemy import and_
-from aiogram.fsm.state import State, StatesGroup
+from sqlalchemy.orm import joinedload
 
 from db.connect import async_session_maker
-from db.models import User, BodyPart, Exercise
-
-from aiogram.types import (
-    KeyboardButton,
-    Message,
-    ReplyKeyboardMarkup,
-    ReplyKeyboardRemove
-)
+from db.models import User, BodyPart, Exercise, History
 
 logging.getLogger('sqlalchemy.engine.Engine').setLevel(logging.ERROR)
 
 load_dotenv()
 
 TOKEN = getenv("bot_token")
+dump_key = getenv("dump_key")
 alembic_cfg = Config(getenv("alembic_cfg"))
 
 dp = Dispatcher()
@@ -50,13 +46,13 @@ class Form(StatesGroup):
     body_part = State()
     bp_id = State()
     exercise = State()
+    ex_id = State()
     note = State()
 
 
 def get_paginated_keyboard(data: list, current_page: int, total_pages: int, prefix: str) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
 
-    # Добавляем элементы текущей страницы
     start = current_page * ITEMS_PER_PAGE
     end = start + ITEMS_PER_PAGE
     for item in data[start:end]:
@@ -65,13 +61,13 @@ def get_paginated_keyboard(data: list, current_page: int, total_pages: int, pref
     builder.adjust(2)
     # Добавляем кнопки пагинации
     navigation_buttons = []
-    if current_page > 0:  # Кнопка "влево" (если не первая страница)
+    if current_page > 0:
         navigation_buttons.append(InlineKeyboardButton(text="«", callback_data=f"{prefix}page_{current_page - 1}"))
-    if current_page < total_pages - 1:  # Кнопка "вправо" (если не последняя страница)
+    if current_page < total_pages - 1:
         navigation_buttons.append(InlineKeyboardButton(text="»", callback_data=f"{prefix}page_{current_page + 1}"))
 
     if navigation_buttons:
-        builder.row(*navigation_buttons)  # Добавляем кнопки на одну строку
+        builder.row(*navigation_buttons)
 
     return builder.as_markup()
 
@@ -129,15 +125,12 @@ async def handle_page_click(callback: CallbackQuery):
 
     keyboard = get_paginated_keyboard(bps_dict, current_page, total_pages, prefix="bp")
 
-    # Обновляем сообщение с новой клавиатурой
     await callback.message.edit_text(f"Что сегодня будем качать?", reply_markup=keyboard)
-    # await callback.answer()
 
 
-# Обработка нажатий на элементы
+# Обработка нажатий на элементы (часть тела)
 @dp.callback_query(lambda callback: callback.data.startswith("bpitem_"))
 async def handle_item_click(callback: CallbackQuery, state: FSMContext):
-
     item_name = callback.data.split("_")[1]
     item_id = callback.data.split("_")[2]
     await state.update_data(body_part=item_name, bp_id=item_id)
@@ -160,7 +153,6 @@ async def handle_item_click(callback: CallbackQuery, state: FSMContext):
 
 @dp.callback_query(lambda callback: callback.data.startswith("ex_choose"))
 async def handle_ex_choose(callback: CallbackQuery, state: FSMContext):
-
     bp_id = await state.get_value("bp_id")
 
     async with async_session_maker() as session:
@@ -174,7 +166,43 @@ async def handle_ex_choose(callback: CallbackQuery, state: FSMContext):
     total_pages = (len(exs_dict) + ITEMS_PER_PAGE - 1) // ITEMS_PER_PAGE
 
     keyboard = get_paginated_keyboard(exs_dict, 0, total_pages, "ex")
-    await callback.message.edit_text("Выберите упражнение", reply_markup=keyboard)
+    if not keyboard.inline_keyboard:
+        await callback.message.edit_text("Нет ни одного созданного упражнения",
+                                         reply_markup=InlineKeyboardMarkup(
+                                             inline_keyboard=[
+                                                 [InlineKeyboardButton(text="Создать", callback_data="ex_create")]
+                                             ]))
+    else:
+        await callback.message.edit_text("Выберите упражнение", reply_markup=keyboard)
+
+
+# Обработка нажатий на элементы (упражнение)
+@dp.callback_query(lambda callback: callback.data.startswith("exitem_"))
+async def handle_item_click_ex(callback: CallbackQuery, state: FSMContext):
+    item_name = callback.data.split("_")[1]
+    item_id = callback.data.split("_")[2]
+
+    await state.update_data(exercise=item_name, ex_id=item_id)
+    await state.set_state(Form.note)
+
+    async with async_session_maker() as session:
+        async with session.begin():
+            hist = await session.execute(
+                select(History).where(
+                    and_(History.user_id == users_db_state.get(callback.from_user.id),
+                         History.exercise_id == item_id)).
+                order_by(History.created_at.asc())
+            )
+            hist_dict = [{"time": e.created_at, "note": e.note} for e in hist.scalars().all()]
+
+    hist_dict = hist_dict[-10:]
+    if hist_dict:
+        hist_msg = "".join(f"{h['time'].strftime('%d.%m.%Y')} | {h['note']}\n" for h in hist_dict)
+    else:
+        hist_msg = "Нет записей о прошлых занятиях.\n"
+    await callback.message.edit_text(f"Вы выбрали: \"{item_name}\".\n{hist_msg}Далее ввод записи формата: 100(8)-90(7)",
+                                     reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
+                                         text="Стоп", callback_data="stop")]]))
 
 
 @dp.callback_query(lambda callback: callback.data.startswith("ex_back"))
@@ -191,6 +219,9 @@ async def handle_ex_create(callback: CallbackQuery, state: FSMContext):
 
 @dp.message(Form.exercise)
 async def process_exercise(message: Message, state: FSMContext) -> None:
+    if message.text == "/exit":
+        await exit_command(message, state)
+        return
     data = await state.update_data(exercise=message.text)
     user_id = users_db_state.get(message.from_user.id)
     async with async_session_maker() as session:
@@ -198,30 +229,127 @@ async def process_exercise(message: Message, state: FSMContext) -> None:
             exercise = Exercise(user_id=user_id, bp_id=data.get("bp_id"), name=data.get("exercise"))
             session.add(exercise)
             await session.commit()
-
+            await state.update_data(ex_id=exercise.id)
     await state.set_state(Form.note)
-    await message.answer(f"Упражнение сохранено.\nДалее ввод записи формата: 100(8)-90(7)")
+    await message.answer(f"Упражнение \"{message.text}\" сохранено.\nДалее ввод записи формата: 100(8)-90(7)",
+                         reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
+                             text="Стоп", callback_data="stop")]]))
 
 
 @dp.message(Form.note)
 async def process_exercise(message: Message, state: FSMContext) -> None:
-    data = await state.update_data(note=message.text)
-    print(data)
+    await state.update_data(note=message.text)
+    if message.text == "/exit":
+        await exit_command(message, state)
+        return
+    await message.answer(f"Подтверждаете запись \"{message.text}\"?.",
+                         reply_markup=
+                         InlineKeyboardMarkup(inline_keyboard=[
+                             [
+                                 InlineKeyboardButton(text="Да", callback_data="save_1"),
+                                 InlineKeyboardButton(text="Нет", callback_data="save_0"),
+                             ]
+                         ]))
+
+
+@dp.callback_query(lambda callback: callback.data.startswith("save"))
+async def handle_save_hist(callback: CallbackQuery, state: FSMContext):
+    flag = callback.data.split("_")[1]
+    if flag == "1":
+        data = await state.get_data()
+        user_id = users_db_state.get(callback.from_user.id)
+        async with async_session_maker() as session:
+            async with session.begin():
+                hist = History(
+                    user_id=int(user_id),
+                    bp_id=int(data.get("bp_id", 0)),
+                    exercise_id=int(data.get("ex_id", 0)),
+                    note=data.get("note", "")
+                )
+                session.add(hist)
+                await session.commit()
+        await callback.message.edit_text(f"Запись сохранена!")
+        await state.clear()
+        del users_db_state[callback.from_user.id]
+    else:
+        await callback.message.edit_text(f"Введите запись о упражнении:")
+        await state.set_state(Form.note)
+
+
+@dp.callback_query(lambda callback: callback.data.startswith("stop"))
+async def handle_stop(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    if users_db_state.get(callback.from_user.id):
+        del users_db_state[callback.from_user.id]
+    msg = callback.message.text.split("\n")[:-1]
+    msg = "\n".join(msg)
+    await callback.message.edit_text(f"{msg}\n/start \n/today_stat")
+
+
+@dp.message(Command("exit"))
+async def exit_command(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    if users_db_state.get(message.from_user.id):
+        del users_db_state[message.from_user.id]
+    await message.answer(f"Завершено.\n /start \n/today_stat")
+
+
+@dp.message(Command("today_stat"))
+async def exit_command(message: Message) -> None:
+    async with async_session_maker() as session:
+        async with session.begin():
+            result = await session.execute(select(User).where(User.user_id == message.from_user.id))
+            user_db = result.scalars().first()
+            if not user_db:
+                await message.answer(f"У вас нет записей.")
+
+            hist = await session.execute(
+                select(History).where(History.user_id == user_db.id).
+                options(joinedload(History.body_part), joinedload(History.exercise)).
+                filter(History.created_at >= datetime.combine(datetime.today(), time.min))
+            )
+
+            hist_dict = [
+                {"bp": e.body_part.name, "exercise": e.exercise.name, "note": e.note}
+                for e in hist.scalars().all()
+            ]
+
+            grouped = defaultdict(list)
+            for item in hist_dict:
+                grouped[item["bp"]].append(item)
+            grouped = dict(grouped)
+            msg = ""
+            c = 1
+            for bp in grouped:
+                msg += f"<b>{bp}</b> \n"
+                for ex in grouped[bp]:
+                    msg += f"{c}. {ex['exercise']} | {ex['note']} \n"
+                    c += 1
+                msg += "\n"
+
+    await message.answer(f"{msg}")
+
+
+@dp.message(Command("dump"))
+async def echo_handler(message: Message) -> None:
+    if len(message.text.split(" ")) == 1:
+        await message.answer(f"боже куда мы лезем...")
+        return
+    pass_phrase = message.text.split(" ")[1]
+    if pass_phrase == dump_key:
+        if os.path.exists("data.db"):
+            await message.answer_document(FSInputFile(path="data.db"), caption="derji")
+        else:
+            await message.answer(f"я в ахуе если често...")
+    else:
+        await message.answer(f"боже куда мы лезем...")
 
 
 @dp.message(Command("body"))
 async def echo_handler(message: Message) -> None:
-    """
-    Handler will forward receive a message back to the sender
-
-    By default, message handler will handle all message types (like a text, photo, sticker etc.)
-    """
     try:
-        # Send a copy of the received message
-        print(message)
         await message.answer("eblan?")
     except TypeError:
-        # But not all the types is supported to be copied so need to handle it
         await message.answer("Nice try!")
 
 
