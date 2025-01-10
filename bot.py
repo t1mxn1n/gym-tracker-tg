@@ -302,6 +302,7 @@ async def exit_command(message: Message) -> None:
             user_db = result.scalars().first()
             if not user_db:
                 await message.answer(f"У вас нет записей.")
+                return
 
             hist = await session.execute(
                 select(History).where(History.user_id == user_db.id).
@@ -313,6 +314,10 @@ async def exit_command(message: Message) -> None:
                 {"bp": e.body_part.name, "exercise": e.exercise.name, "note": e.note}
                 for e in hist.scalars().all()
             ]
+
+            if not hist_dict:
+                await message.answer(f"У вас нет записей за сегодня.")
+                return
 
             grouped = defaultdict(list)
             for item in hist_dict:
