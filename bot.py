@@ -56,7 +56,7 @@ def get_paginated_keyboard(data: list, current_page: int, total_pages: int, pref
     start = current_page * ITEMS_PER_PAGE
     end = start + ITEMS_PER_PAGE
     for item in data[start:end]:
-        builder.button(text=item["name"], callback_data=f"{prefix}item_{item['name']}_{item['id']}")
+        builder.button(text=item["name"][:29], callback_data=f"{prefix}item_{item['id']}")
 
     builder.adjust(2)
     # Добавляем кнопки пагинации
@@ -131,12 +131,19 @@ async def handle_page_click(callback: CallbackQuery):
 # Обработка нажатий на элементы (часть тела)
 @dp.callback_query(lambda callback: callback.data.startswith("bpitem_"))
 async def handle_item_click(callback: CallbackQuery, state: FSMContext):
-    item_name = callback.data.split("_")[1]
-    item_id = callback.data.split("_")[2]
-    await state.update_data(body_part=item_name, bp_id=item_id)
+
+    item_id = callback.data.split("_")[1]
+
+    async with async_session_maker() as session:
+        async with session.begin():
+            bp_name = await session.execute(select(BodyPart.name).where(BodyPart.id == item_id))
+
+    bp_name = bp_name.scalars().first()
+
+    await state.update_data(body_part=bp_name, bp_id=item_id)
 
     await callback.message.edit_text(
-        f"Вы выбрали: {item_name}",
+        f"Вы выбрали: {bp_name}",
         reply_markup=InlineKeyboardMarkup(
             inline_keyboard=[
                 [
@@ -179,10 +186,15 @@ async def handle_ex_choose(callback: CallbackQuery, state: FSMContext):
 # Обработка нажатий на элементы (упражнение)
 @dp.callback_query(lambda callback: callback.data.startswith("exitem_"))
 async def handle_item_click_ex(callback: CallbackQuery, state: FSMContext):
-    item_name = callback.data.split("_")[1]
-    item_id = callback.data.split("_")[2]
 
-    await state.update_data(exercise=item_name, ex_id=item_id)
+    item_id = callback.data.split("_")[1]
+
+    async with async_session_maker() as session:
+        async with session.begin():
+            ex_name = await session.execute(select(Exercise.name).where(Exercise.id == item_id))
+    ex_name = ex_name.scalars().first()
+
+    await state.update_data(exercise=ex_name, ex_id=item_id)
     await state.set_state(Form.note)
 
     async with async_session_maker() as session:
@@ -200,7 +212,7 @@ async def handle_item_click_ex(callback: CallbackQuery, state: FSMContext):
         hist_msg = "".join(f"{h['time'].strftime('%d.%m.%Y')} | {h['note']}\n" for h in hist_dict)
     else:
         hist_msg = "Нет записей о прошлых занятиях.\n"
-    await callback.message.edit_text(f"Вы выбрали: \"{item_name}\".\n{hist_msg}Далее ввод записи формата: 100(8)-90(7)",
+    await callback.message.edit_text(f"Вы выбрали: \"{ex_name}\".\n{hist_msg}Далее ввод записи формата: 100(8)-90(7)",
                                      reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
                                          text="Стоп", callback_data="stop")]]))
 
