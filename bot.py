@@ -57,7 +57,6 @@ def get_paginated_keyboard(data: list, current_page: int, total_pages: int, pref
     end = start + ITEMS_PER_PAGE
     for item in data[start:end]:
         builder.button(text=item["name"][:29], callback_data=f"{prefix}item_{item['id']}")
-
     builder.adjust(2)
     # Добавляем кнопки пагинации
     navigation_buttons = []
@@ -110,6 +109,27 @@ async def command_start_handler(message: Message, from_func: bool = False) -> No
             except Exception as e:
                 logger.error(f"Unexpected error: {e}")
                 await session.rollback()
+
+
+@dp.callback_query(lambda callback: callback.data.startswith("expage_"))
+async def handle_page_click_ex(callback: CallbackQuery, state: FSMContext):
+    # todo: сделать кеш на запрос в бд
+    bp_id = await state.get_value("bp_id")
+    async with async_session_maker() as session:
+        async with session.begin():
+            exs = await session.execute(
+                select(Exercise).where(and_(Exercise.user_id == users_db_state.get(callback.from_user.id),
+                                            Exercise.bp_id == bp_id))
+            )
+            exs_dict = [{"id": e.id, "name": e.name} for e in exs.scalars().all()]
+
+    current_page = int(callback.data.split("_", 1)[1])
+    total_pages = (len(exs_dict) + ITEMS_PER_PAGE - 1) // ITEMS_PER_PAGE
+
+    keyboard = get_paginated_keyboard(exs_dict, current_page, total_pages, prefix="ex")
+
+    await callback.message.edit_text(f"Выберите упражнение", reply_markup=keyboard)
+
 
 
 @dp.callback_query(lambda callback: callback.data.startswith("bppage_"))
@@ -354,8 +374,8 @@ async def echo_handler(message: Message) -> None:
         return
     pass_phrase = message.text.split(" ")[1]
     if pass_phrase == dump_key:
-        if os.path.exists("data.db"):
-            await message.answer_document(FSInputFile(path="data.db"), caption="derji")
+        if os.path.exists("data2.db"):
+            await message.answer_document(FSInputFile(path="data2.db"), caption="derji")
         else:
             await message.answer(f"я в ахуе если често...")
     else:

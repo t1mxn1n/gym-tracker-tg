@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncAttrs
 from sqlalchemy.orm import DeclarativeBase
 from sqlalchemy.orm import relationship, Mapped, mapped_column
 from sqlalchemy.sql import func
+from sqlalchemy import UniqueConstraint
 
 
 class Base(AsyncAttrs, DeclarativeBase):
@@ -31,19 +32,22 @@ class BodyPart(Base):
 
     exercises: Mapped[List["Exercise"]] = relationship(back_populates="body_part")
 
-
 class Exercise(Base):
     __tablename__ = 'exercise'
 
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("user.id"))
     bp_id: Mapped[int] = mapped_column(ForeignKey("body_part.id"))
-    name: Mapped[str] = mapped_column(String(50), unique=True, nullable=False)
+    name: Mapped[str] = mapped_column(String(50), nullable=False)
 
     # M:1 (M exercises -> 1 user)
     user: Mapped["User"] = relationship(back_populates="exercises")
     # M:1 (M exercises -> 1 body part)
     body_part: Mapped["BodyPart"] = relationship(back_populates="exercises")
+
+    __table_args__ = (
+        UniqueConstraint('name', 'bp_id', name='uq_exercise_name_bp_id'),
+    )
 
 
 class History(Base):
