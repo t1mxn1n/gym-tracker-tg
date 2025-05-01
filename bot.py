@@ -375,7 +375,7 @@ async def echo_handler(message: Message) -> None:
     pass_phrase = message.text.split(" ")[1]
     if pass_phrase == dump_key:
         if os.path.exists("data.db"):
-            await message.answer_document(FSInputFile(path="data2.db"), caption="derji")
+            await message.answer_document(FSInputFile(path="data.db"), caption="derji")
         else:
             await message.answer(f"я в ахуе если често...")
     else:
